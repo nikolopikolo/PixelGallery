@@ -191,7 +191,7 @@ class ImageStorageManager(private val context: Context) {
      * Loads a downsampled bitmap suitable for the circular 456x456 Pixel Watch 3 display.
      * Uses LRU in-memory cache and RGB_565 to eliminate GC stalls.
      */
-    fun loadOptimalBitmap(filePath: String, maxDimension: Int = 1080): Bitmap? {
+    fun loadOptimalBitmap(filePath: String, maxDimension: Int = 720): Bitmap? {
         val cached = bitmapCache.get(filePath)
         if (cached != null && !cached.isRecycled) {
             return cached
@@ -225,13 +225,13 @@ class ImageStorageManager(private val context: Context) {
         if (currentIndex > 0) {
             val prev = photos[currentIndex - 1]
             if (bitmapCache.get(prev.originalPath) == null) {
-                loadOptimalBitmap(prev.originalPath)
+                loadOptimalBitmap(prev.originalPath, maxDimension = 720)
             }
         }
         if (currentIndex < photos.size - 1) {
             val next = photos[currentIndex + 1]
             if (bitmapCache.get(next.originalPath) == null) {
-                loadOptimalBitmap(next.originalPath)
+                loadOptimalBitmap(next.originalPath, maxDimension = 720)
             }
         }
     }
@@ -248,7 +248,11 @@ class ImageStorageManager(private val context: Context) {
             }
             if (angle != 0f) {
                 val matrix = Matrix().apply { postRotate(angle) }
-                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated != bitmap) {
+                    bitmap.recycle()
+                }
+                rotated
             } else {
                 bitmap
             }

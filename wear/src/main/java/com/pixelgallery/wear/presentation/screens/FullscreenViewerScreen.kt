@@ -1,6 +1,7 @@
 package com.pixelgallery.wear.presentation.screens
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -10,23 +11,33 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -48,6 +59,7 @@ import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -127,6 +139,7 @@ fun FullscreenViewerScreen(
     // Controls and counter auto-hide state (fades after 2 seconds)
     var showControls by remember { mutableStateOf(true) }
     var showCounter by remember { mutableStateOf(true) }
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
     var lastInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     fun markUserActivity() {
@@ -135,11 +148,13 @@ fun FullscreenViewerScreen(
         showCounter = true
     }
 
-    // Auto-hide controls after 2 seconds of inactivity
-    LaunchedEffect(lastInteractionTime) {
-        delay(2000)
-        showControls = false
-        showCounter = false
+    // Auto-hide controls after 2 seconds of inactivity (paused while confirmation dialog is active)
+    LaunchedEffect(lastInteractionTime, showDeleteConfirmation) {
+        if (!showDeleteConfirmation) {
+            delay(2000)
+            showControls = false
+            showCounter = false
+        }
     }
 
     // Focus Requester for Crown rotary zoom
@@ -186,10 +201,12 @@ fun FullscreenViewerScreen(
         }
     }
 
+    val isZoomed by remember { derivedStateOf { rawScale > 1.05f } }
+
     // Load downsampled bitmap using LRU memory cache
     val loadedBitmap by produceState<Bitmap?>(initialValue = null, key1 = record.photo.id) {
         value = withContext(Dispatchers.IO) {
-            storageManager.loadOptimalBitmap(record.originalPath, maxDimension = 1080)
+            storageManager.loadOptimalBitmap(record.originalPath, maxDimension = 720)
         }
     }
 
@@ -205,58 +222,13 @@ fun FullscreenViewerScreen(
                 applyZoomDelta(-event.verticalScrollPixels)
                 true
             }
-            // 2. Pinch-to-zoom (2 fingers) & Panning when zoomed in
-            .pointerInput(record.photo.id) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    markUserActivity()
-                    val newScale = (rawScale * zoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
-                    rawScale = newScale
-                    targetScale = newScale
-                    isAnimatedZoom = false
-
-                    if (newScale > 1.05f) {
-                        val maxOffsetX = (containerSize.width * (newScale - 1f)) / 2f
-                        val maxOffsetY = (containerSize.height * (newScale - 1f)) / 2f
-                        offset = Offset(
-                            x = (offset.x + pan.x).coerceIn(-maxOffsetX, maxOffsetX),
-                            y = (offset.y + pan.y).coerceIn(-maxOffsetY, maxOffsetY)
-                        )
-                    } else {
-                        offset = Offset.Zero
-                    }
-                }
-            }
-            // 3. Single-finger drag: Swipe navigation when at fit-to-screen (zoom <= 1.05)
-            .pointerInput(record.photo.id) {
-                detectDragGestures(
-                    onDrag = { change, dragAmount ->
-                        if (rawScale <= 1.05f) {
-                            change.consume()
-                            swipeDragOffset += dragAmount.x
-                        }
-                    },
-                    onDragEnd = {
-                        if (rawScale <= 1.05f) {
-                            if (swipeDragOffset < -SWIPE_THRESHOLD_PX && currentIndex < totalCount - 1) {
-                                onNext()
-                            } else if (swipeDragOffset > SWIPE_THRESHOLD_PX && currentIndex > 0) {
-                                onPrevious()
-                            }
-                            swipeDragOffset = 0f
-                        }
-                    },
-                    onDragCancel = {
-                        swipeDragOffset = 0f
-                    }
-                )
-            }
-            // 4. Double-tap to zoom & Tap to toggle UI controls
+            // 2. Double-tap to zoom & Tap to toggle UI controls
             .pointerInput(record.photo.id) {
                 detectTapGestures(
                     onDoubleTap = { tapOffset ->
                         markUserActivity()
                         isAnimatedZoom = true
-                        if (targetScale > 1.2f) {
+                        if (rawScale > 1.2f) {
                             targetScale = MIN_ZOOM
                             rawScale = MIN_ZOOM
                             offset = Offset.Zero
@@ -279,6 +251,82 @@ fun FullscreenViewerScreen(
                         if (showControls) lastInteractionTime = System.currentTimeMillis()
                     }
                 )
+            }
+            // 3. Unified Single-Finger Pan/Swipe & Two-Finger Pinch-to-Zoom
+            .pointerInput(record.photo.id) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    markUserActivity()
+
+                    var isDragging = false
+                    var isMultiTouch = false
+                    var accumulatedDrag = Offset.Zero
+                    val touchSlop = viewConfiguration.touchSlop
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val pointerCount = event.changes.count { it.pressed }
+
+                        if (pointerCount >= 2) {
+                            isMultiTouch = true
+                            val zoom = event.calculateZoom()
+                            val pan = event.calculatePan()
+                            if (zoom != 1f || pan != Offset.Zero) {
+                                val newScale = (rawScale * zoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                                rawScale = newScale
+                                targetScale = newScale
+                                isAnimatedZoom = false
+
+                                if (newScale > 1.05f) {
+                                    val maxOffsetX = (containerSize.width * (newScale - 1f)) / 2f
+                                    val maxOffsetY = (containerSize.height * (newScale - 1f)) / 2f
+                                    offset = Offset(
+                                        x = (offset.x + pan.x).coerceIn(-maxOffsetX, maxOffsetX),
+                                        y = (offset.y + pan.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                    )
+                                } else {
+                                    offset = Offset.Zero
+                                }
+                                event.changes.forEach { it.consume() }
+                            }
+                        } else if (pointerCount == 1 && !isMultiTouch) {
+                            val change = event.changes.firstOrNull { it.pressed } ?: break
+                            val dragDelta = change.position - change.previousPosition
+
+                            if (!isDragging) {
+                                accumulatedDrag += dragDelta
+                                if (accumulatedDrag.getDistance() > touchSlop) {
+                                    isDragging = true
+                                }
+                            }
+
+                            if (isDragging) {
+                                change.consume()
+                                if (rawScale > 1.05f) {
+                                    // ZOOMED IN: Pan around the image freely in all directions
+                                    val maxOffsetX = (containerSize.width * (rawScale - 1f)) / 2f
+                                    val maxOffsetY = (containerSize.height * (rawScale - 1f)) / 2f
+                                    offset = Offset(
+                                        x = (offset.x + dragDelta.x).coerceIn(-maxOffsetX, maxOffsetX),
+                                        y = (offset.y + dragDelta.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                    )
+                                } else {
+                                    // NOT ZOOMED IN: Horizontal swipe for next/previous photo
+                                    swipeDragOffset += dragDelta.x
+                                }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+
+                    if (rawScale <= 1.05f && isDragging && !isMultiTouch) {
+                        if (swipeDragOffset < -SWIPE_THRESHOLD_PX && currentIndex < totalCount - 1) {
+                            onNext()
+                        } else if (swipeDragOffset > SWIPE_THRESHOLD_PX && currentIndex > 0) {
+                            onPrevious()
+                        }
+                    }
+                    swipeDragOffset = 0f
+                }
             },
         contentAlignment = Alignment.Center
     ) {
@@ -291,9 +339,10 @@ fun FullscreenViewerScreen(
                     .fillMaxSize()
                     .graphicsLayer {
                         // High-performance GPU layer: zero recomposition during pan/zoom
-                        scaleX = currentScale
-                        scaleY = currentScale
-                        translationX = offset.x + (if (currentScale <= 1.05f) swipeDragOffset else 0f)
+                        val scale = if (isAnimatedZoom) animatedScale else rawScale
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x + (if (scale <= 1.05f) swipeDragOffset else 0f)
                         translationY = offset.y
                     },
                 contentScale = ContentScale.Fit
@@ -366,9 +415,9 @@ fun FullscreenViewerScreen(
                         .padding(horizontal = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (currentScale > 1.05f) {
+                    if (isZoomed) {
                         Text(
-                            text = "${String.format(java.util.Locale.US, "%.1fx", currentScale)}",
+                            text = String.format(java.util.Locale.US, "%.1fx", rawScale),
                             color = Color(0xFF7BD0B8),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
@@ -381,7 +430,10 @@ fun FullscreenViewerScreen(
                         .size(34.dp)
                         .clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.65f))
-                        .clickable { onDelete(record.photo.id) },
+                        .clickable {
+                            markUserActivity()
+                            showDeleteConfirmation = true
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -395,7 +447,7 @@ fun FullscreenViewerScreen(
         }
 
         // Bottom Reset Zoom Button (when zoomed in)
-        if (currentScale > 1.05f) {
+        if (isZoomed) {
             Box(
                 modifier = Modifier
                     .padding(bottom = 16.dp)
@@ -424,6 +476,106 @@ fun FullscreenViewerScreen(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
                     )
+                }
+            }
+        }
+
+        // Delete Confirmation Modal Overlay
+        if (showDeleteConfirmation) {
+            BackHandler(enabled = true) {
+                showDeleteConfirmation = false
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.88f))
+                    .clickable(enabled = true, onClick = { /* consume backdrop taps */ }),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF5C1D1D)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = Color(0xFFF28B82),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "Delete photo?",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Text(
+                        text = "Cannot be undone",
+                        color = Color.Gray,
+                        fontSize = 10.sp,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Cancel (Dismiss)
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF2A2D36))
+                                .clickable {
+                                    showDeleteConfirmation = false
+                                    markUserActivity()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Confirm Delete
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFB3261E))
+                                .clickable {
+                                    showDeleteConfirmation = false
+                                    onDelete(record.photo.id)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Confirm Delete",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
